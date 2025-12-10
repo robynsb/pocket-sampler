@@ -1,8 +1,42 @@
+#include <dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include <dt-bindings/i2c/i2c.h>
+
 / {
 	aliases {
+		mydac = &i2c0;
         
 	};
 	chosen {
 		
+    };
+};
+
+&pinctrl {
+	i2c0_custom: i2c0_custom {
+		group1 {
+			pinmux = <I2C0_SDA_P4>;
+			input-enable;
+			input-schmitt-enable;
+            bias-pull-up;
+		};
+
+		group2 {
+			pinmux = <I2C0_SCL_P5>;
+			input-enable;
+			input-schmitt-enable;
+            bias-pull-up;
+		};
+	};
+
+};
+
+&i2c0 {
+    status = "okay";
+    pinctrl-0 = <&i2c0_custom>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+	dac: dac@4c {
+        reg = <0x4c>;
     };
 };

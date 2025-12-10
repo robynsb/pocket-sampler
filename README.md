@@ -17,3 +17,8 @@ and set serial port to
 ```
 /dev/tty.usbmodem11101
 ```
+
+using screen
+```bash
+screen /dev/tty.usbmodem11101
+```
