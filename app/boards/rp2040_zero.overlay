@@ -3,7 +3,7 @@
 
 / {
 	aliases {
-		mydac = &i2c0;
+		mydac = &dac_adafruit_ad5693r;
         
 	};
 	chosen {

@@ -12,7 +12,8 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
-static const struct device *const dac_dev = DEVICE_DT_GET(DT_NODELABEL(dac_adafruit_ad5693r));
+// static const struct device *const dac_dev = DEVICE_DT_GET(DT_NODELABEL(dac_adafruit_ad5693r));
+static const struct device *const dac_dev = DEVICE_DT_GET(DT_ALIAS(mydac));
 
 static const struct dac_channel_cfg dac_ch_cfg = {
 	.channel_id  = 0,

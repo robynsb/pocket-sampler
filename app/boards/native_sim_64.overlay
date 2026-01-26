@@ -1,6 +1,11 @@
 / {
 	aliases {
-        
+		mydac = &fake_dac;
 	};
-    
+    fake_dac: dac_mock {
+        compatible = "zephyr,dac-mock";
+        status = "okay";
+        #io-channel-cells = <1>;
+    };
+
 };
