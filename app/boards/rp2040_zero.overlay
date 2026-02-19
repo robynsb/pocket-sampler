@@ -4,12 +4,14 @@
 / {
 	aliases {
 		mydac = &dac_adafruit_ad5693r;
+		mypio = &pio1;
         
 	};
 	chosen {
 		
     };
 };
+
 
 &pinctrl {
 	i2c0_custom: i2c0_custom {
@@ -35,7 +37,7 @@
 			bias-pull-up;
 		};
 
-		tx_pins {
+		tx_pins: tx_pins {
 			pinmux = <PIO1_P0>;
 		};
 	};
@@ -64,8 +66,9 @@
 		pinctrl-0 = <&pio1_uart0_default>;
 		pinctrl-names = "default";
 
-		compatible = "raspberrypi,pico-uart-pio";
+		compatible = "robin,pico-uart-pio";
 		current-speed = <115200>;
 		status = "okay";
 	};
 };
+

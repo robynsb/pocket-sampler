@@ -12,3 +12,4 @@ tests:
   app.debug:
     extra_overlay_confs:
       - debug.conf
+
