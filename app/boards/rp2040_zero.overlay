@@ -54,12 +54,14 @@
 
 };
 
-&pio1 {
-	status = "okay";
+&pio1 { status = "okay";
 
 	pio1_i2s0: i2s0 {
 		pinctrl-0 = <&pio1_i2s>;
 		pinctrl-names = "default";
+		// TODO: Look over what these mean and that these values make sense
+		#address-cells = <1>; 
+		#size-cells = <0>;
 
 		compatible = "raspberrypi,pico-i2s-pio";
 		status = "okay";

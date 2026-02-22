@@ -1,6 +1,0 @@
-description: Raspberry Pi Pico PIO UART copy written by robin
-
-compatible: "raspberrypi,pico-i2s-pio"
-
-include: ["raspberrypi,pico-pio-device.yaml"]
-# TODO: Does nothing right now i still need to figure out how to include it!!
