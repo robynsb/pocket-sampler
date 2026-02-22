@@ -224,6 +224,7 @@ void audio_i2s_start(const struct device *dev) {
 }
 
 // TODO: magic number 11!
+// TODO: hardcoded dma_channel
 #define PIO_I2S_INIT(idx)									\
 	PINCTRL_DT_INST_DEFINE(idx);								\
     static void pio_i2s_irq_config_##idx(const struct device *dev)				\
