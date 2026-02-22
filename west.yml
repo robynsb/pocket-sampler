@@ -1,12 +1,9 @@
 # Copyright (c) 2021 Nordic Semiconductor ASA
 # SPDX-License-Identifier: Apache-2.0
-
 manifest:
   remotes:
     - name: zephyrproject-rtos
       url-base: https://github.com/zephyrproject-rtos
-    - name: guy-who-fixed-flash
-      url-base: https://github.com/TerryGeng
 
   projects:
     - name: zephyr
@@ -18,8 +15,3 @@ manifest:
         name-allowlist:
           - cmsis_6
           - hal_rpi_pico
-
-    - name: hal_rpi_pico
-      remote: guy-who-fixed-flash
-      revision: fix_flash
-      path: modules/hal/rpi_pico

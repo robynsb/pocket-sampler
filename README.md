@@ -1,9 +1,16 @@
 # Pocket Sampler
 
+## Dependencies
+
+Follow the [Zephyr getting started guide](https://docs.zephyrproject.org/latest/develop/getting_started/index.html).
+
 ## How to build
 For RP2040 Zero
 
 ```bash
+west init -m git@github.com:robynsb/pocket-sampler.git pocketsampler
+cd pocketsampler
+west update
 west build -S cdc-acm-console -b rp2040_zero app/
 west flash
 ```

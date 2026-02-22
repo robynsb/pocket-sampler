@@ -135,8 +135,6 @@ void audio_i2s_dma_irq_handler(const void *arg) {
     }
 }
 
-
-
 static int pio_i2s_init(const struct device *dev)
 {
 	const struct pio_i2s_config *config = dev->config;
