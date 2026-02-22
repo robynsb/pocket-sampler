@@ -30,15 +30,10 @@
 		};
 	};
 
-	pio1_uart0_default: pio1_uart0_default {
-		rx_pins {
-			pinmux = <PIO1_P1>;
-			input-enable;
-			bias-pull-up;
-		};
-
+	pio1_i2s: pio1_i2s {
 		tx_pins: tx_pins {
-			pinmux = <PIO1_P0>;
+			//        DATA    CLK BASE  WS
+			pinmux = <PIO1_P0 PIO1_P1 PIO1_P2>;
 		};
 	};
 
@@ -62,13 +57,15 @@
 &pio1 {
 	status = "okay";
 
-	pio1_uart0: uart0 {
-		pinctrl-0 = <&pio1_uart0_default>;
+	pio1_i2s0: i2s0 {
+		pinctrl-0 = <&pio1_i2s>;
 		pinctrl-names = "default";
 
-		compatible = "robin,pico-uart-pio";
-		current-speed = <115200>;
+		compatible = "raspberrypi,pico-i2s-pio";
 		status = "okay";
 	};
 };
 
+&dma {
+	status = "okay";
+};

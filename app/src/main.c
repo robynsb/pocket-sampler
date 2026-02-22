@@ -10,11 +10,16 @@
 #include <zephyr/drivers/dac.h>
 #include <math.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/misc/pio_rpi_pico/pio_rpi_pico.h>
 #include <hardware/pio.h>
+#include <hardware/dma.h>
 #include <hardware/clocks.h>
 
 
@@ -23,92 +28,137 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define CYCLES_PER_BIT 8
 #define SIDESET_BIT_COUNT 2
 
-#define DT_DRV_COMPAT robin_pico_uart_pio // required to use DT_INST_FOREACH_STATUS_OKAY
+#define DT_DRV_COMPAT raspberrypi_pico_i2s_pio // required to use DT_INST_FOREACH_STATUS_OKAY
 
-struct pio_uart_config {
+typedef void (*pio_i2s_irq_config_func_t)(const struct device *dev);
+
+struct pio_i2s_config {
 	const struct device *piodev;
 	const struct pinctrl_dev_config *pcfg;
-	const uint32_t tx_pin;
-	uint32_t baudrate;
+	const uint32_t data_pin;
+	const uint32_t clock_pin_base;
+	const uint8_t dma_channel;
+    const pio_i2s_irq_config_func_t irq_config;
 };
 
-struct pio_uart_data {
+struct {
+    uint32_t freq;
+    uint8_t pio_sm;
+    uint8_t dma_channel;
+} shared_state;
+
+struct pio_i2s_data {
 	size_t tx_sm;
 };
 
 
-RPI_PICO_PIO_DEFINE_PROGRAM(uart_tx, 0, 3,
-		/* .wrap_target */
-	0x9fa0, /*  0: pull   block           side 1 [7]  */
-	0xf727, /*  1: set    x, 7            side 0 [7]  */
-	0x6001, /*  2: out    pins, 1                     */
-	0x0642, /*  3: jmp    x--, 2                 [6]  */
-		/* .wrap */
+RPI_PICO_PIO_DEFINE_PROGRAM(i2s_tx, 0, 3,
+            //     .wrap_target
+    0x7001, //  0: out    pins, 1         side 2
+    0x1840, //  1: jmp    x--, 0          side 3
+    0x6001, //  2: out    pins, 1         side 0
+    0xe82e, //  3: set    x, 14           side 1
+    0x6001, //  4: out    pins, 1         side 0
+    0x0844, //  5: jmp    x--, 4          side 1
+    0x7001, //  6: out    pins, 1         side 2
+    0xf82e, //  7: set    x, 14           side 3
+            //     .wrap
 );
 
-static int pio_uart_tx_init(PIO pio, uint32_t sm, uint32_t tx_pin, float div)
+#define audio_i2s_wrap_target 0
+#define audio_i2s_wrap 7
+#define audio_i2s_offset_entry_point 7u
+#define PICO_AUDIO_I2S_DMA_IRQ 0 // We hardcode to use DMA_IRQ_0
+
+static int pio_i2s_tx_init(PIO pio, uint32_t sm, uint32_t data_pin, uint32_t clock_pin_base)
 {
 	uint32_t offset;
 	pio_sm_config sm_config;
 
-	if (!pio_can_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(uart_tx))) {
+	if (!pio_can_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(i2s_tx))) {
 		return -EBUSY;
 	}
 
-	offset = pio_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(uart_tx));
+	offset = pio_add_program(pio, RPI_PICO_PIO_GET_PROGRAM(i2s_tx));
 	sm_config = pio_get_default_sm_config();
+    sm_config_set_wrap(&sm_config, offset + audio_i2s_wrap_target, offset + audio_i2s_wrap);
+    sm_config_set_sideset(&sm_config, 2, false, false);
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+    pio_sm_init(pio, sm, offset, &sm_config);
+    uint32_t pin_mask = (1u << data_pin) | (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+    pio_sm_set_pins(pio, sm, 0); // clear pins
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_offset_entry_point));
 
-	sm_config_set_sideset(&sm_config, SIDESET_BIT_COUNT, true, false);
-	sm_config_set_out_shift(&sm_config, true, false, 0);
-	sm_config_set_out_pins(&sm_config, tx_pin, 1);
-	sm_config_set_sideset_pins(&sm_config, tx_pin);
-	sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
-	sm_config_set_clkdiv(&sm_config, div);
-	sm_config_set_wrap(&sm_config,
-			   offset + RPI_PICO_PIO_GET_WRAP_TARGET(uart_tx),
-			   offset + RPI_PICO_PIO_GET_WRAP(uart_tx));
-
-	pio_sm_set_pins_with_mask(pio, sm, BIT(tx_pin), BIT(tx_pin));
-	pio_sm_set_pindirs_with_mask(pio, sm, BIT(tx_pin), BIT(tx_pin));
-	pio_sm_init(pio, sm, offset, &sm_config);
-	pio_sm_set_enabled(pio, sm, true);
+    // update_pio_frequency
+    uint32_t sample_freq = 24000; // TODO: some hardcoded thing idk
+    uint32_t system_clock_frequency = clock_get_hz(clk_sys);
+    assert(system_clock_frequency < 0x40000000);
+    uint32_t divider = system_clock_frequency * 4 / sample_freq; // avoid arithmetic overflow
+    assert(divider < 0x1000000);
+    pio_sm_set_clkdiv_int_frac(pio, sm, divider >> 8u, divider & 0xffu);
+    shared_state.freq = sample_freq;
 
 	return 0;
 }
 
-static void pio_uart_poll_out(const struct device *dev, unsigned char c)
-{
-	const struct pio_uart_config *config = dev->config;
-	struct pio_uart_data *data = dev->data;
+#define SAMPLE_LENGTH 128 // Hardcoded sample length
+static int32_t sine_wave_table[SAMPLE_LENGTH] = {0};
 
-	pio_sm_put_blocking(pio_rpi_pico_get_pio(config->piodev), data->tx_sm, (uint32_t)c);
+static inline void audio_start_dma_transfer() {
+
+    // if (!) {
+    //     // just play some silence
+    //     static uint32_t zero;
+    //     dma_channel_config c = dma_get_channel_config(shared_state.dma_channel);
+    //     channel_config_set_read_increment(&c, false);
+    //     dma_channel_set_config(shared_state.dma_channel, &c, false);
+    //     dma_channel_transfer_from_buffer_now(shared_state.dma_channel, &zero, SAMPLE_LENGTH);
+    //     return;
+    // }
+    dma_channel_config c = dma_get_channel_config(shared_state.dma_channel);
+    channel_config_set_read_increment(&c, true);
+    dma_channel_set_config(shared_state.dma_channel, &c, false);
+    dma_channel_transfer_from_buffer_now(shared_state.dma_channel, (void *) sine_wave_table, SAMPLE_LENGTH);
 }
 
-static int pio_uart_init(const struct device *dev)
+
+void audio_i2s_dma_irq_handler(const void *arg) {
+    uint dma_channel = shared_state.dma_channel;
+    if (dma_irqn_get_channel_status(PICO_AUDIO_I2S_DMA_IRQ, dma_channel)) {
+        dma_irqn_acknowledge_channel(PICO_AUDIO_I2S_DMA_IRQ, dma_channel);
+
+        audio_start_dma_transfer();
+    }
+}
+
+
+
+static int pio_i2s_init(const struct device *dev)
 {
-	const struct pio_uart_config *config = dev->config;
-	struct pio_uart_data *data = dev->data;
-	float sm_clock_div;
+	const struct pio_i2s_config *config = dev->config;
+	struct pio_i2s_data *data = dev->data;
 	size_t tx_sm;
 	int retval;
 	PIO pio;
 
 	pio = pio_rpi_pico_get_pio(config->piodev);
-	sm_clock_div = (float)clock_get_hz(clk_sys) / (CYCLES_PER_BIT * config->baudrate);
 
 	retval = pio_rpi_pico_allocate_sm(config->piodev, &tx_sm);
-
-
 	if (retval < 0) {
 		LOG_ERR("pio_rpi_pico_allocate_sm failed with ret = %d", retval);
 		return retval;
 	}
 
 	data->tx_sm = tx_sm;
+    shared_state.pio_sm = tx_sm;
 
-	retval = pio_uart_tx_init(pio, tx_sm, config->tx_pin, sm_clock_div);
+	retval = pio_i2s_tx_init(pio, tx_sm, config->data_pin, config->clock_pin_base);
 	if (retval < 0) {
-		LOG_ERR("pio_uart_tx_init failed with ret = %d", retval);
+		LOG_ERR("pio_i2s_tx_init failed with ret = %d", retval);
 		return retval;
 	}
 
@@ -116,27 +166,89 @@ static int pio_uart_init(const struct device *dev)
 	retval = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
 	if (retval < 0) {
 		LOG_ERR("pinctrl_apply_state failed with ret = %d", retval);
+        return retval;
 	}
 
-	return retval;
+    // TODO: Use zephyr's DMA driver.
+    uint8_t dma_channel = config->dma_channel;
+    dma_channel_claim(dma_channel);
+
+    shared_state.dma_channel = dma_channel;
+
+    dma_channel_config dma_config = dma_channel_get_default_config(dma_channel);
+
+    channel_config_set_dreq(&dma_config,
+                            DREQ_PIO1_TX0 + tx_sm // TODO: Hardcoded from device tree choosing PIO1
+    );
+    // channel_config_set_dreq(&dma_config, DREQ_FORCE);
+
+    channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32); // TODO: Hardcoded 16 bit audio, 2*16 for stereo = 4 bytes
+
+    dma_channel_configure(dma_channel,
+                          &dma_config,
+                          &pio->txf[tx_sm],  // dest
+                          NULL, // src
+                          0, // count
+                          false // trigger
+    );
+
+    // irq_add_shared_handler(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, audio_i2s_dma_irq_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+    // retval = irq_connect_dynamic(DT_IRQN(DT_NODELABEL(dma)),  // TODO: Do proper interrupt
+    //             0, 
+    //             audio_i2s_dma_irq_handler, 
+    //             NULL, 
+    //             0);
+    // if (retval < 0) {
+	// 	LOG_ERR("irq_connect_dynamic failed with ret = %d", retval);
+    //     return retval;
+	// }
+
+    dma_irqn_set_channel_enabled(PICO_AUDIO_I2S_DMA_IRQ, dma_channel, 1);
+
+    return !(retval >= 0);
 }
 
-#define PIO_UART_INIT(idx)									\
+
+void audio_i2s_start(const struct device *dev) {
+	const struct pio_i2s_config *config = dev->config;
+	PIO pio = pio_rpi_pico_get_pio(config->piodev);
+
+    // irq_set_enabled(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, true);
+    // irq_enable(DT_IRQN(DT_NODELABEL(dma)));
+    config->irq_config(dev);
+    pio_sm_set_enabled(pio, shared_state.pio_sm, true);
+    audio_start_dma_transfer();
+
+
+
+}
+
+// TODO: magic number 11!
+#define PIO_I2S_INIT(idx)									\
 	PINCTRL_DT_INST_DEFINE(idx);								\
-	static const struct pio_uart_config pio_uart##idx##_config = {				\
+    static void pio_i2s_irq_config_##idx(const struct device *dev)				\
+	{											\
+		IRQ_CONNECT(11,				\
+			    0, audio_i2s_dma_irq_handler,					\
+			    DEVICE_DT_INST_GET(idx), 0);					\
+		irq_enable(11);				\
+	}                                                              \
+	static const struct pio_i2s_config pio_i2s##idx##_config = {				\
 		.piodev = DEVICE_DT_GET(DT_INST_PARENT(idx)),					\
 		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(idx),					\
-		.tx_pin = DT_INST_RPI_PICO_PIO_PIN_BY_NAME(idx, default, 0, tx_pins, 0),	\
-		.baudrate = DT_INST_PROP(idx, current_speed),					\
+		.data_pin = DT_INST_RPI_PICO_PIO_PIN_BY_NAME(idx, default, 0, tx_pins, 0),	\
+		.clock_pin_base = DT_INST_RPI_PICO_PIO_PIN_BY_NAME(idx, default, 0, tx_pins, 1),	\
+        .irq_config = pio_i2s_irq_config_##idx,		\
+        .dma_channel = 7                    \
 	};											\
-	static struct pio_uart_data pio_uart##idx##_data;					\
+	static struct pio_i2s_data pio_i2s##idx##_data;					\
 												\
-	DEVICE_DT_INST_DEFINE(idx, pio_uart_init, NULL, &pio_uart##idx##_data,			\
-			      &pio_uart##idx##_config, POST_KERNEL,				\
+	DEVICE_DT_INST_DEFINE(idx, pio_i2s_init, NULL, &pio_i2s##idx##_data,			\
+			      &pio_i2s##idx##_config, POST_KERNEL,				\
 			      CONFIG_SERIAL_INIT_PRIORITY,					\
 			      NULL);
 
-DT_INST_FOREACH_STATUS_OKAY(PIO_UART_INIT)
+DT_INST_FOREACH_STATUS_OKAY(PIO_I2S_INIT)
 
 
 
@@ -145,16 +257,29 @@ int main(void) {
 
 	k_sleep(K_MSEC(10000));	
 
-	const struct device *uart0 = DEVICE_DT_GET(DT_NODELABEL(pio1_uart0));
+	const struct device *i2s0 = DEVICE_DT_GET(DT_NODELABEL(pio1_i2s0));
+	const struct pio_i2s_config *config = i2s0->config;
+	PIO pio = pio_rpi_pico_get_pio(config->piodev);
 
-	char data = 0b01010101;
+    float volume = 0.15;
+    for (int i = 0; i < SAMPLE_LENGTH; i++) {
+        int16_t val = 32767 * volume * cosf(i * 2 * (float) (M_PI / SAMPLE_LENGTH));
+        // sine_wave_table[i] = 32767 * volume * cosf(i * 2 * (float) (M_PI / SAMPLE_LENGTH));
+        sine_wave_table[i]= (val  & 0xFFFF) | (val << 16);
+
+        // sine_wave_table[i]= val | (val << 16) & 0xFFFF;
+    }
+
+    audio_i2s_start(i2s0);
+
+
+	// char data = 0b01010101;
+	// // ret = pio_uart_init(my_config);
+
 	int i = 0;
-	// ret = pio_uart_init(my_config);
-
 	while (1) {
-		LOG_INF("Lmao lets a gooo (%d) ret = %d", i++, ret);
-		pio_uart_poll_out(uart0, data);
-		k_sleep(K_MSEC(100));	
+        LOG_INF("test %d", i++);
+		k_sleep(K_MSEC(1000));	
 	}
 
 	return 0;
