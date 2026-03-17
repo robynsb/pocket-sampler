@@ -17,11 +17,11 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 #define SAMPLE_LENGTH 128
 #define NUM_BLOCKS 20
 #define BLOCK_SIZE (SAMPLE_LENGTH * sizeof(int32_t))
-#define SAMPLE_RATE 44100
+#define SAMPLE_RATE 31100
 
 /* Chirp parameters */
 #define FREQ_START 20.0f
-#define FREQ_END 10000.0f
+#define FREQ_END 20000.0f
 #define SWEEP_DURATION 5.0f
 #define TOTAL_SWEEP_SAMPLES (SAMPLE_RATE * SWEEP_DURATION * 2)  /* 441,000 for 10 sec */
 
@@ -100,6 +100,11 @@ static void generate_chirp_block(int32_t *buffer, uint32_t num_samples)
 int main(void)
 {
     int ret;
+    for (int i =3; i >=0; i--) {
+        k_sleep(K_MSEC(1000));
+        LOG_INF("Booting in %d...", i);
+
+    }
     k_sleep(K_MSEC(100));
     LOG_INF("Booting - Optimized chirp version");
     

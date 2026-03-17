@@ -26,11 +26,7 @@ west build -b native_sim/native/64 app -- -DEXTRA_CONF_FILE=debug.conf
 ## Access shell
 using minicom
 ```bash
-minicom -s
-```
-and set serial port to
-```
-/dev/tty.usbmodem11101
+minicom -D /dev/tty.usbmodem11101
 ```
 
 using screen

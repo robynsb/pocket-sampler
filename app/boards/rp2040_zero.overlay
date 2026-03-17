@@ -1,4 +1,5 @@
 #include <dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2040.h>
 #include <dt-bindings/i2c/i2c.h>
 
 / {
@@ -65,6 +66,12 @@
 
 		compatible = "raspberrypi,pico-i2s-pio";
 		status = "okay";
+
+		// TODO: Check how this works, but for now I believe that:
+		//         channel      SLOT                  channel-config?
+		//         number  (which corresponds to an IRQN)
+		dmas = <&dma 7     RPI_PICO_DMA_SLOT_PIO1_TX0        0>;
+		dma-names = "tx";
 	};
 };
 
