@@ -1,6 +1,5 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 #include <string.h>
 #include <zephyr/usb/usb_device.h>
@@ -15,9 +14,11 @@
 LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
 #define SAMPLE_LENGTH 128
-#define NUM_BLOCKS 20
+#define NUM_BLOCKS 5
 #define BLOCK_SIZE (SAMPLE_LENGTH * sizeof(int32_t))
 #define SAMPLE_RATE 31100
+#define PLAY_CHIRP_OR_TONE 0
+#define TONE_FREQUENCY_HZ 440.0f
 
 /* Chirp parameters */
 #define FREQ_START 20.0f
@@ -60,11 +61,16 @@ static inline float get_frequency_at_time(float t)
  */
 static void generate_chirp_block(int32_t *buffer, uint32_t num_samples)
 {
+    float frequency;
+#if PLAY_CHIRP_OR_TONE
     /* Time at start of this block */
     float time_ms = (float)(block_counter * SAMPLE_LENGTH) / SAMPLE_RATE;
     
     /* Get frequency for this block - only ONE calculation for 128 samples */
-    float frequency = get_frequency_at_time(time_ms);
+    frequency = get_frequency_at_time(time_ms);
+#else
+    frequency = TONE_FREQUENCY_HZ;
+#endif
     
     /* Pre-calculate the phase increment per sample */
     float phase_increment = 2.0f * M_PI * frequency / SAMPLE_RATE;
@@ -93,9 +99,30 @@ static void generate_chirp_block(int32_t *buffer, uint32_t num_samples)
     /* Wrap block counter to create infinite loop */
     if (block_counter * SAMPLE_LENGTH >= TOTAL_SWEEP_SAMPLES) {
         block_counter = 0;
-        phase = 0.0f;
     }
 }
+
+static volatile uint32_t test = 0;
+
+static void logging_thread(void *arg1, void *arg2, void *arg3)
+{
+    (void)arg1;
+    (void)arg2;
+    (void)arg3;
+    
+    test = 0;
+    while (1) {
+        k_sleep(K_MSEC(10));
+        test++;
+        // if(test % 100 == 0) {
+        //     LOG_INF("Logging tick %d", test);
+            
+        // }
+    }
+}
+
+#define LOG_THREAD_STACK_SIZE 512
+K_THREAD_DEFINE(log_tid, LOG_THREAD_STACK_SIZE, logging_thread, NULL, NULL, NULL, 7, 0, 0);
 
 int main(void)
 {
@@ -106,11 +133,11 @@ int main(void)
 
     }
     k_sleep(K_MSEC(100));
-    LOG_INF("Booting - Optimized chirp version");
+    LOG_INF("Booting - Audio generator");
     
     const struct device *i2s0 = DEVICE_DT_GET(DT_NODELABEL(pio1_i2s0));
     if (!device_is_ready(i2s0)) {
-        printf("I2S device not ready\n");
+        LOG_INF("I2S device not ready\n");
         return -ENODEV;
     }
     
@@ -125,11 +152,15 @@ int main(void)
     
     ret = i2s_configure(i2s0, I2S_DIR_TX, &i2s_cfg);
     if (ret < 0) {
-        printf("I2S config failed: %d\n", ret);
+        LOG_INF("I2S config failed: %d\n", ret);
         return ret;
     }
     
+#if PLAY_CHIRP_OR_TONE
     LOG_INF("Starting frequency sweep: 20 Hz to 20 kHz over 10 seconds");
+#else
+    LOG_INF("Starting fixed tone: 440 Hz sine");
+#endif
     
     void *temp_ptr;
     for (int i = 0; i < NUM_BLOCKS; i++) {
@@ -144,18 +175,72 @@ int main(void)
     
     ret = i2s_trigger(i2s0, I2S_DIR_TX, I2S_TRIGGER_START);
     if (ret < 0) {
-        printf("I2S trigger start failed\n");
+        LOG_INF("I2S trigger start failed\n");
         return ret;
     }
     
     LOG_INF("I2S playback started");
-    
+    bool playing = true;
+    bool draining = false;
+    test = 0;
+    int duration = 50;
     while (1) {
-        ret = k_mem_slab_alloc(&tx_0_mem_slab, &temp_ptr, K_FOREVER);
-        if (ret == 0) {
+
+        if(playing){
+            ret = k_mem_slab_alloc(&tx_0_mem_slab, &temp_ptr, K_MSEC(1000));
+            if (ret < 0) {
+                // LOG_ERR("Failed to alloc slab.");
+                continue;
+            }
             generate_chirp_block((int32_t *)temp_ptr, SAMPLE_LENGTH);
-            i2s_write(i2s0, temp_ptr, BLOCK_SIZE);
+            ret = i2s_write(i2s0, temp_ptr, BLOCK_SIZE);
+            if (ret < 0) {
+                // LOG_ERR("Failed to write to i2s device.");
+                // break;
+                playing = false;
+                draining = false;
+                test = 0;
+                continue;
+            }
+        } else {
+            k_msleep(10);
         }
+        if (test > duration && playing && !draining) {
+            // LOG_INF("try to drain");
+            ret = i2s_trigger(i2s0, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
+            if(ret < 0) {
+                // LOG_INF("I2S trigger drain failed\n");
+                break;
+            }
+            draining = true;
+        }
+        if (test > duration && !playing) {
+            // LOG_INF("try to start");
+
+            void *temp_ptr;
+            for (int i = 0; i < NUM_BLOCKS; i++) {
+                ret = k_mem_slab_alloc(&tx_0_mem_slab, &temp_ptr, K_MSEC(0));
+                if (ret < 0) {
+                    // LOG_INF("break");
+                    break;
+                }
+                generate_chirp_block((int32_t *)temp_ptr, SAMPLE_LENGTH);
+                i2s_write(i2s0, temp_ptr, BLOCK_SIZE);
+            }
+
+
+            ret = i2s_trigger(i2s0, I2S_DIR_TX, I2S_TRIGGER_START);
+            if (ret < 0) {
+                // LOG_INF("I2S repeated trigger start failed\n");
+                break;
+            }
+            playing = true;
+            test = 0;
+        }
+    }
+    while (true) {
+        LOG_INF("crashed :(");
+        k_sleep(K_MSEC(5000));
     }
     
     return 0;
