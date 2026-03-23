@@ -11,6 +11,17 @@
 #include <hardware/clocks.h>
 #include <math.h>
 
+/*
+
+TODO: This code doesn't really work properly.
+
+Investigate the drain trigger with a debugger to understand why the timing maybe doesn't work.
+
+
+
+
+*/
+
 LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
 #define SAMPLE_LENGTH 128
