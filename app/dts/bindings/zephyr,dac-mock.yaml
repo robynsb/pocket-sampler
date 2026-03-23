@@ -1,3 +1,0 @@
-description: Mock DAC driver for native_sim
-compatible: "zephyr,dac-mock"
-include: dac-controller.yaml

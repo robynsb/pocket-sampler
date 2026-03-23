@@ -34,7 +34,7 @@
 	pio1_i2s: pio1_i2s {
 		tx_pins: tx_pins {
 			//        DATA    CLK BASE  WS
-			pinmux = <PIO1_P0 PIO1_P1 PIO1_P2>;
+			pinmux = <PIO1_P26 PIO1_P27 PIO1_P28>;
 		};
 	};
 
