@@ -64,7 +64,6 @@ static void tone_toggle_thread(void *arg1, void *arg2, void *arg3)
         k_sleep(K_MSEC(1000));
         bool next_state = !atomic_get(&playing_tone);
         atomic_set(&playing_tone, next_state);
-        LOG_INF("playing_tone=%d", next_state);
     }
 }
 

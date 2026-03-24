@@ -33,3 +33,30 @@ using screen
 ```bash
 screen /dev/tty.usbmodem11101
 ```
+
+# Preloaded filesystem
+
+Following Mike Szczys' [blog](https://blog.golioth.io/how-to-flash-a-pre-loaded-filesystem-during-production/).
+
+
+Get filesystem with:
+```bash
+picotool save -r 0x10100000 0x101FFFFF filesystem.bin
+littlefs-python list filesystem.bin --block-size 4096
+```
+
+Create new filesystem with
+```bash
+littlefs-python create preloaded-samples-fs/ preloaded-fs.bin --block-size 4096 --block-count 256
+```
+to produce binary file containing all your samples.
+
+```bash
+littlefs-python list preloaded-fs.bin --block-size 4096
+```
+to see inspect your binary.
+
+Load binary onto device:
+```bash
+picotool load -o 0x10100000 preloaded-fs.bin -v
+```

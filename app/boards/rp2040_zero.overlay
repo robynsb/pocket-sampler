@@ -1,56 +1,38 @@
 #include <dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
 #include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2040.h>
-#include <dt-bindings/i2c/i2c.h>
 
 / {
 	aliases {
-		mydac = &dac_adafruit_ad5693r;
 		mypio = &pio1;
         
 	};
 	chosen {
 		
     };
+	
+	fstab {
+        compatible = "zephyr,fstab";
+        samples: lfs1 {
+            compatible = "zephyr,fstab,littlefs";
+            mount-point = "/samples";
+            partition = <&storage_partition>;
+            automount;
+            read-size = <16>;
+            prog-size = <16>;
+            cache-size = <64>;
+            lookahead-size = <32>;
+            block-cycles = <512>;
+        };
+    };
 };
 
 
 &pinctrl {
-	i2c0_custom: i2c0_custom {
-		group1 {
-			pinmux = <I2C0_SDA_P4>;
-			input-enable;
-			input-schmitt-enable;
-            bias-pull-up;
-		};
-
-		group2 {
-			pinmux = <I2C0_SCL_P5>;
-			input-enable;
-			input-schmitt-enable;
-            bias-pull-up;
-		};
-	};
-
 	pio1_i2s: pio1_i2s {
 		tx_pins: tx_pins {
 			//        DATA    CLK BASE  WS
 			pinmux = <PIO1_P26 PIO1_P27 PIO1_P28>;
 		};
-	};
-
-};
-
-&i2c0 {
-    status = "okay";
-    pinctrl-0 = <&i2c0_custom>;
-    pinctrl-names = "default";
-    clock-frequency = <I2C_BITRATE_FAST>;
-
-	dac_adafruit_ad5693r: dac@4c {
-		status = "okay";
-		compatible = "adi,ad5693";
-		reg = <0x4c>;
-		#io-channel-cells = <1>;
 	};
 
 };
@@ -77,4 +59,22 @@
 
 &dma {
 	status = "okay";
+};
+
+&flash0 {
+	partitions {
+		/*
+		 * Usable flash. Starts at 0x100, after the bootloader. The partition
+		 * size is 1MB minus the 0x100 bytes taken by the bootloader.
+		 */
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x100 (DT_SIZE_M(1) - 0x100)>;
+			read-only;
+		};
+		storage_partition: partition@100000 {
+			label = "storage-partition";
+			reg = <DT_SIZE_M(1) DT_SIZE_M(1)>;
+		};
+	};
 };
