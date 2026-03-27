@@ -39,10 +39,16 @@ screen /dev/tty.usbmodem11101
 Following Mike Szczys' [blog](https://blog.golioth.io/how-to-flash-a-pre-loaded-filesystem-during-production/).
 
 
+
 Get filesystem with:
 ```bash
 picotool save -r 0x10100000 0x101FFFFF filesystem.bin
 littlefs-python list filesystem.bin --block-size 4096
+```
+
+Convert music files into correct format with
+```bash
+ffmpeg -i kick0.mp3 -c:a pcm_s16le kick0.wav
 ```
 
 Create new filesystem with
