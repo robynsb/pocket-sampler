@@ -29,99 +29,6 @@ static atomic_t playing_tone = ATOMIC_INIT(1);
 static const struct device *i2s0_dev;
 
 K_SEM_DEFINE(audio_start_sem, 0, 1);
-K_SEM_DEFINE(reader_start_sem, 0, 1);
-
-static void generate_tone_block(int32_t *buffer, uint32_t num_samples)
-{
-    float phase_increment = 2.0f * M_PI * TONE_FREQUENCY_HZ / SAMPLE_RATE;
-    float volume = 0.05f;
-
-    for (uint32_t i = 0; i < num_samples; i++) {
-        phase += phase_increment;
-
-        if (phase > 2.0f * M_PI) {
-            phase -= 2.0f * M_PI;
-        }
-
-        int16_t sample_int = (int16_t)(32767.0f * volume * sinf(phase));
-        int32_t stereo_sample = (sample_int & 0xFFFF) | (sample_int << 16);
-        buffer[i] = stereo_sample;
-    }
-}
-
-static inline void fill_audio_block(int32_t *buffer, uint32_t num_samples, bool play_tone)
-{
-    if (play_tone) {
-        generate_tone_block(buffer, num_samples);
-    } else {
-        memset(buffer, 0, num_samples * sizeof(buffer[0]));
-    }
-}
-
-static void tone_toggle_thread(void *arg1, void *arg2, void *arg3)
-{
-    (void)arg1;
-    (void)arg2;
-    (void)arg3;
-
-    while (1) {
-        k_sleep(K_MSEC(1000));
-        bool next_state = !atomic_get(&playing_tone);
-        atomic_set(&playing_tone, next_state);
-    }
-}
-
-static void audio_enqueue_thread(void *arg1, void *arg2, void *arg3)
-{
-    (void)arg1;
-    (void)arg2;
-    (void)arg3;
-
-    k_sem_take(&audio_start_sem, K_FOREVER);
-
-    int ret;
-    void *block;
-
-    for (int i = 0; i < NUM_BLOCKS; i++) {
-        ret = k_mem_slab_alloc(&tx_0_mem_slab, &block, K_FOREVER);
-        if (ret < 0) {
-            LOG_ERR("k_mem_slab_alloc failed: %d", ret);
-            return;
-        }
-
-        fill_audio_block((int32_t *)block, SAMPLE_LENGTH, atomic_get(&playing_tone));
-        ret = i2s_write(i2s0_dev, block, BLOCK_SIZE);
-        if (ret < 0) {
-            k_mem_slab_free(&tx_0_mem_slab, block);
-            LOG_ERR("Initial i2s_write failed: %d", ret);
-            return;
-        }
-    }
-
-    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
-    if (ret < 0) {
-        LOG_ERR("I2S trigger start failed: %d", ret);
-        return;
-    }
-
-    LOG_INF("I2S continuous playback started");
-
-    while (1) {
-        ret = k_mem_slab_alloc(&tx_0_mem_slab, &block, K_FOREVER);
-        if (ret < 0) {
-            LOG_ERR("k_mem_slab_alloc failed: %d", ret);
-            continue;
-        }
-
-        fill_audio_block((int32_t *)block, SAMPLE_LENGTH, atomic_get(&playing_tone));
-        ret = i2s_write(i2s0_dev, block, BLOCK_SIZE);
-        if (ret < 0) {
-            k_mem_slab_free(&tx_0_mem_slab, block);
-            LOG_ERR("i2s_write failed: %d", ret);
-            k_sleep(K_MSEC(10));
-        }
-    }
-}
 
 #define SAMPLE_PARTITION_NODE DT_NODELABEL(samples)
 FS_FSTAB_DECLARE_ENTRY(SAMPLE_PARTITION_NODE);
@@ -216,6 +123,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
             return;
         }
 
+        // TODO: This is serial. We want to make this parallel.
         ret = fs_read(&file, &data, sizeof(data));
         if (ret < 0) {
             LOG_ERR("fs_read failed: %d", ret);
@@ -294,10 +202,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
     }
 }
 
-#define TOGGLE_THREAD_STACK_SIZE 512
 #define AUDIO_THREAD_STACK_SIZE 1024
-// K_THREAD_DEFINE(toggle_tid, TOGGLE_THREAD_STACK_SIZE, tone_toggle_thread, NULL, NULL, NULL, 7, 0, 0);
-// K_THREAD_DEFINE(audio_tid, AUDIO_THREAD_STACK_SIZE, audio_enqueue_thread, NULL, NULL, NULL, 6, 0, 0);
 K_THREAD_DEFINE(reader_tid, AUDIO_THREAD_STACK_SIZE, sample_flash_reader_thread, NULL, NULL, NULL, 5, 0, 0);
 
 int main(void)
@@ -334,7 +239,6 @@ int main(void)
 
     LOG_INF("Configured I2S; starting tone/silence worker");
     k_sem_give(&audio_start_sem);
-    k_sem_give(&reader_start_sem);
 
     while (1) {
         k_sleep(K_FOREVER);
