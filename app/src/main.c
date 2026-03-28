@@ -11,27 +11,99 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
+// TODO: Consolidate naming between blocks, samples, sample slices, instruments.
 #define SAMPLE_LENGTH 128
 #define NUM_BLOCKS 5
 #define BLOCK_SIZE (SAMPLE_LENGTH * sizeof(int32_t))
-#define SAMPLE_RATE 31100
+#define SAMPLE_BLOCK_SIZE SAMPLE_LENGTH * sizeof(int16_t)
+#define SAMPLE_RATE 44100
 #define TONE_FREQUENCY_HZ 440.0f
 
+K_SEM_DEFINE(audio_start_sem, 0, 1);
+
+// TODO: Think about these alignments
 K_MEM_SLAB_DEFINE_STATIC(tx_0_mem_slab, BLOCK_SIZE, NUM_BLOCKS, 32);
+
+K_MEM_SLAB_DEFINE_STATIC(sample_data_slab, SAMPLE_BLOCK_SIZE, NUM_BLOCKS, 32);
+
+struct read_order_t {
+    uint32_t restart_in; // number of sample points before restarting from beginning.
+    bool play;
+};
+
+K_MSGQ_DEFINE(order_msgq, sizeof(struct read_order_t), NUM_BLOCKS, 1);
+
+struct sample_read_result_t {
+    void *data; 
+};
+
+K_MSGQ_DEFINE(sample_read_result_msgq, sizeof(struct sample_read_result_t), NUM_BLOCKS, 1);
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
 
-/* Shared state */
-static float phase = 0.0f;
-static atomic_t playing_tone = ATOMIC_INIT(1);
 static const struct device *i2s0_dev;
 
-K_SEM_DEFINE(audio_start_sem, 0, 1);
 
 #define SAMPLE_PARTITION_NODE DT_NODELABEL(samples)
 FS_FSTAB_DECLARE_ENTRY(SAMPLE_PARTITION_NODE);
+
+// TODO: Make "current" beat configuration struct.
+K_MUTEX_DEFINE(beat_config_mutex);
+static volatile float bpm = 120;
+
+static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
+{
+    (void)arg1;
+    (void)arg2;
+    (void)arg3;
+    int ret;
+
+    uint32_t beats_per_measure = 4;
+    uint32_t number_of_measures_in_loop = 4;
+    uint32_t current_sample = 0;
+
+    while(true) {
+        ret = k_mutex_lock(&beat_config_mutex, K_MSEC(1000));
+        if (ret < 0) {
+            LOG_ERR("failed to acquire beat_config_mutex");
+            break;
+        }
+
+        // TODO: Check floats vs int types in this expression
+        uint32_t number_of_sample_points_per_beat = SAMPLE_RATE/(bpm/60.0f);
+
+        ret = k_mutex_unlock(&beat_config_mutex);
+        if (ret < 0) {
+            LOG_ERR("failed to release beat_config_mutex");
+            break;
+        }
+
+        uint32_t number_of_sample_points_per_loop = beats_per_measure*number_of_measures_in_loop*number_of_sample_points_per_beat;
+
+        uint32_t number_of_sample_points_played_of_beat = current_sample % number_of_sample_points_per_beat;
+
+        uint32_t number_of_sample_points_left_from_beat = number_of_sample_points_per_beat - number_of_sample_points_played_of_beat;
+
+        struct read_order_t order = {
+            .restart_in = number_of_sample_points_left_from_beat,
+            .play = true
+        };
+
+        ret = k_msgq_put(&order_msgq, &order, K_MSEC(10000));
+        if (ret < 0) {
+            LOG_ERR("failed to enqueue order_msgq");
+            break;
+        }
+        current_sample = (current_sample + SAMPLE_LENGTH) % number_of_sample_points_per_loop;
+    }
+
+    while(true) {
+        LOG_ERR("orchestrator failed :((");
+        k_sleep(K_MSEC(8000));
+    }
+}
 
 static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 {
@@ -42,7 +114,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 
 
     // k_sem_take(&reader_start_sem, K_FOREVER);
-    k_sem_take(&audio_start_sem, K_FOREVER);
+    // k_sem_take(&audio_start_sem, K_FOREVER);
 	struct fs_mount_t *mountpoint = &FS_FSTAB_ENTRY(SAMPLE_PARTITION_NODE);
 	struct fs_statvfs sbuf;
     ret = fs_statvfs(mountpoint->mnt_point, &sbuf);
@@ -76,7 +148,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 	// }
 	// LOG_PRINTK("%s read count:%u (bytes: %d)\n", fname, boot_count, rc);
     uint8_t header_data[0x4E];
-    ret = fs_read(&file, &header_data, sizeof(header_data));
+    ret = fs_read(&file, header_data, sizeof(header_data));
     if (ret < 0) {
         LOG_ERR("FAIL: read %s: [rd:%d]", fname, ret);
         return;
@@ -112,10 +184,84 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
     // TODO: Put some errors stating assumptions on audio data.
     off_t start_position = fs_tell(&file);
 
+    LOG_INF("Starting reader");
 
-    uint8_t data[2*SAMPLE_LENGTH];
+    while (1) {
+        // k_sleep(K_MSEC(1000));
+
+        struct read_order_t order;
+
+        ret = k_msgq_get(&order_msgq, &order, K_MSEC(10000));
+        if (ret < 0) {
+            LOG_ERR("k_msgq_get failed: %d", ret);
+            break;
+        }
+
+        uint8_t *buffer;
+        ret = k_mem_slab_alloc(&sample_data_slab, (void **) &buffer, K_MSEC(5000));
+        if (ret < 0) {
+            LOG_ERR("k_mem_slab_alloc failed sample_data_slab: %d", ret);
+            break;
+        }
+
+
+        // fill audio block
+        if(order.restart_in >= SAMPLE_LENGTH) {
+            ret = fs_read(&file, buffer, SAMPLE_BLOCK_SIZE);
+            if (ret != SAMPLE_BLOCK_SIZE) {
+                // fill the rest with 0s
+                for (int i = ret; i < SAMPLE_BLOCK_SIZE; i++) {
+                    buffer[i] = 0;
+                }
+            }
+
+        } else {
+            ret = fs_seek(&file, start_position, FS_SEEK_SET);
+            if (ret < 0) {
+                LOG_ERR("fs_seek failed: %d", ret);
+                break;
+            }
+
+            uint32_t num_bytes_to_read = order.restart_in * sizeof(uint16_t);
+
+            ret = fs_read(&file, buffer, num_bytes_to_read);
+            if (ret != num_bytes_to_read) {
+                LOG_ERR("fs_read failed: %d. Sample too short?!", ret);
+                break;
+            }
+        }
+
+        //enqueue
+        struct sample_read_result_t read_result = {
+            .data = buffer
+        };
+
+        ret = k_msgq_put(&sample_read_result_msgq, &read_result, K_MSEC(1000));
+        if (ret < 0) {
+            LOG_ERR("failed to enqueue sample_read_result_msgq");
+            break;
+        }
+    }
+    while(1) {
+        LOG_ERR("reader failed :((");
+        k_sleep(K_MSEC(8000));
+    }
+}
+
+static void sound_thread(void *arg1, void *arg2, void *arg3)
+{
+    (void)arg1;
+    (void)arg2;
+    (void)arg3;
+    int ret;
+
+
+    // k_sem_take(&reader_start_sem, K_FOREVER);
+    k_sem_take(&audio_start_sem, K_FOREVER);
+
 
     for (int i = 0; i < NUM_BLOCKS; i++) {
+
         int32_t *buffer;
         ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_MSEC(5000));
         if (ret < 0) {
@@ -123,20 +269,12 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
             return;
         }
 
-        // TODO: This is serial. We want to make this parallel.
-        ret = fs_read(&file, &data, sizeof(data));
-        if (ret < 0) {
-            LOG_ERR("fs_read failed: %d", ret);
-            return;
-        }
 
         for(int j = 0; j < SAMPLE_LENGTH; j++) {
-            int16_t sample_point = sys_get_le16(&data[j]);
+            int16_t sample_point = 0;
             int32_t stereo_sample = (sample_point & 0xFFFF) | (sample_point << 16);
             buffer[j] = stereo_sample;
         }
-
-        // fill_audio_block((int32_t *)block, SAMPLE_LENGTH, atomic_get(&playing_tone));
         
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
         if (ret < 0) {
@@ -155,55 +293,48 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
     LOG_INF("I2S continuous playback started from flash");
 
     while (1) {
-        // k_sleep(K_MSEC(1000));
+        struct sample_read_result_t read_result;
+        ret = k_msgq_get(&sample_read_result_msgq, &read_result, K_MSEC(10000));
+        if (ret < 0) {
+            LOG_ERR("k_msgq_get failed: %d", ret);
+            break;
+        }
 
         int32_t *buffer;
         ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_MSEC(5000));
         if (ret < 0) {
-            LOG_ERR("k_mem_slab_alloc failed: %d", ret);
-            continue;
+            LOG_ERR("k_mem_slab_alloc failed tx_0_mem_slab: %d", ret);
+            break;
         }
 
-        // fill audio block
-        ret = fs_read(&file, &data, sizeof(data));
-        if (ret != sizeof(data)) {
-            LOG_INF("fs_read failed: %d, starting again...", ret);
 
-            ret = fs_seek(&file, start_position, FS_SEEK_SET);
-            if (ret < 0) {
-                LOG_ERR("fs_seek failed: %d", ret);
-                break;
-            }
-
-            // retry
-            ret = fs_read(&file, &data, sizeof(data));
-            if (ret != sizeof(data)) {
-                LOG_ERR("fs_read failed: %d", ret);
-                break;
-            }
-        }
+        uint8_t *sample_data = read_result.data;
 
         for(int j = 0; j < SAMPLE_LENGTH; j++) {
-            int16_t sample_point = sys_get_le16(&data[2*j]);
+            int16_t sample_point = sys_get_le16(&sample_data[2*j]);
             int32_t stereo_sample = (sample_point & 0xFFFF) | (sample_point << 16);
             buffer[j] = stereo_sample;
         }
+        k_mem_slab_free(&sample_data_slab, read_result.data);
 
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
         if (ret < 0) {
             k_mem_slab_free(&tx_0_mem_slab, buffer);
             LOG_ERR("i2s_write failed: %d", ret);
             k_sleep(K_MSEC(1000));
+            break;
         }
     }
     while(1) {
-        LOG_ERR("failed :((");
+        LOG_ERR("reader failed :((");
         k_sleep(K_MSEC(8000));
     }
 }
 
 #define AUDIO_THREAD_STACK_SIZE 1024
 K_THREAD_DEFINE(reader_tid, AUDIO_THREAD_STACK_SIZE, sample_flash_reader_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(sounder_tid, AUDIO_THREAD_STACK_SIZE, sound_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(orchestrator_tid, AUDIO_THREAD_STACK_SIZE, orchestrator_thread, NULL, NULL, NULL, 5, 0, 0);
 
 int main(void)
 {
@@ -238,6 +369,7 @@ int main(void)
     }
 
     LOG_INF("Configured I2S; starting tone/silence worker");
+    // k_sleep(K_MSEC(1000));
     k_sem_give(&audio_start_sem);
 
     while (1) {
