@@ -5,8 +5,11 @@
 #include <string.h>
 #include <zephyr/drivers/i2s.h>
 #include <math.h>
+#include <stdlib.h>
+#include <errno.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/littlefs.h>
+#include <zephyr/shell/shell.h>
 #include <zephyr/sys/byteorder.h>
 
 LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
@@ -52,6 +55,74 @@ FS_FSTAB_DECLARE_ENTRY(SAMPLE_PARTITION_NODE);
 // TODO: Make "current" beat configuration struct.
 K_MUTEX_DEFINE(beat_config_mutex);
 static volatile float bpm = 120;
+
+static int cmd_bpm_get(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    int ret = k_mutex_lock(&beat_config_mutex, K_MSEC(1000));
+    if (ret < 0) {
+        shell_error(shell, "failed to acquire beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    float current_bpm = bpm;
+
+    ret = k_mutex_unlock(&beat_config_mutex);
+    if (ret < 0) {
+        shell_error(shell, "failed to release beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    shell_print(shell, "bpm=%.2f", (double)current_bpm);
+    return 0;
+}
+
+static int cmd_bpm_set(const struct shell *shell, size_t argc, char **argv)
+{
+    if (argc != 2) {
+        shell_error(shell, "usage: bpm set <value>");
+        return -EINVAL;
+    }
+
+    errno = 0;
+    char *endptr = NULL;
+    float requested_bpm = strtof(argv[1], &endptr);
+    if ((errno != 0) || (endptr == argv[1]) || (*endptr != '\0')) {
+        shell_error(shell, "invalid bpm value: %s", argv[1]);
+        return -EINVAL;
+    }
+
+    if ((requested_bpm < 20.0f) || (requested_bpm > 400.0f)) {
+        shell_error(shell, "bpm out of range (20.0..400.0): %.2f", (double)requested_bpm);
+        return -ERANGE;
+    }
+
+    int ret = k_mutex_lock(&beat_config_mutex, K_MSEC(1000));
+    if (ret < 0) {
+        shell_error(shell, "failed to acquire beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    bpm = requested_bpm;
+
+    ret = k_mutex_unlock(&beat_config_mutex);
+    if (ret < 0) {
+        shell_error(shell, "failed to release beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    shell_print(shell, "bpm set to %.2f", (double)requested_bpm);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_bpm,
+    SHELL_CMD(set, NULL, "Set BPM. Usage: bpm set <value>", cmd_bpm_set),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(bpm, &sub_bpm, "Get or set BPM. Usage: bpm | bpm set <value>", cmd_bpm_get);
 
 static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 {
