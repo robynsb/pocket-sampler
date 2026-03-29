@@ -75,7 +75,7 @@ static int cmd_bpm_get(const struct shell *shell, size_t argc, char **argv)
         return ret;
     }
 
-    shell_print(shell, "bpm=%.2f", (double)current_bpm);
+    shell_print(shell, "bpm=%d", (uint32_t) current_bpm);
     return 0;
 }
 
@@ -95,7 +95,7 @@ static int cmd_bpm_set(const struct shell *shell, size_t argc, char **argv)
     }
 
     if ((requested_bpm < 20.0f) || (requested_bpm > 400.0f)) {
-        shell_error(shell, "bpm out of range (20.0..400.0): %.2f", (double)requested_bpm);
+        shell_error(shell, "bpm out of range (20.0..400.0): %d", (uint32_t) requested_bpm);
         return -ERANGE;
     }
 
@@ -113,7 +113,7 @@ static int cmd_bpm_set(const struct shell *shell, size_t argc, char **argv)
         return ret;
     }
 
-    shell_print(shell, "bpm set to %.2f", (double)requested_bpm);
+    shell_print(shell, "bpm set to %d", (uint32_t)requested_bpm);
     return 0;
 }
 
@@ -132,7 +132,7 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
     int ret;
 
     uint32_t beats_per_measure = 4;
-    uint32_t number_of_measures_in_loop = 4;
+    uint32_t number_of_measures_in_loop = 1;
     uint32_t current_sample = 0;
 
     while(true) {
@@ -153,9 +153,11 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 
         uint32_t number_of_sample_points_per_loop = beats_per_measure*number_of_measures_in_loop*number_of_sample_points_per_beat;
 
-        uint32_t number_of_sample_points_played_of_beat = current_sample % number_of_sample_points_per_beat;
+        // Make current_sample % number_of_sample_points_per_beat == 0 mean "we have played the entirety of the last beat"
+        uint32_t number_of_sample_points_played_of_beat = (current_sample + number_of_sample_points_per_beat - 1) % number_of_sample_points_per_beat + 1;
 
         uint32_t number_of_sample_points_left_from_beat = number_of_sample_points_per_beat - number_of_sample_points_played_of_beat;
+        // LOG_INF("x %d %d %d", number_of_sample_points_left_from_beat, number_of_sample_points_played_of_beat, current_sample);
 
         struct read_order_t order = {
             .restart_in = number_of_sample_points_left_from_beat,
@@ -212,12 +214,6 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 		return;
 	}
 
-    // rc = fs_read(&file, &boot_count, sizeof(boot_count));
-	// if (rc < 0) {
-	// 	LOG_ERR("FAIL: read %s: [rd:%d]", fname, rc);
-	// 	goto out;
-	// }
-	// LOG_PRINTK("%s read count:%u (bytes: %d)\n", fname, boot_count, rc);
     uint8_t header_data[0x4E];
     ret = fs_read(&file, header_data, sizeof(header_data));
     if (ret < 0) {
@@ -257,6 +253,8 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 
     LOG_INF("Starting reader");
 
+    int num_byte_samples_played = 0;
+
     while (1) {
         // k_sleep(K_MSEC(1000));
 
@@ -275,28 +273,47 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
             break;
         }
 
+        off_t curr_position = fs_tell(&file);
+        // LOG_INF("z %li %d", curr_position, order.restart_in);
 
         // fill audio block
+        uint32_t num_bytes_to_read;
         if(order.restart_in >= SAMPLE_LENGTH) {
-            ret = fs_read(&file, buffer, SAMPLE_BLOCK_SIZE);
-            if (ret != SAMPLE_BLOCK_SIZE) {
-                // fill the rest with 0s
-                for (int i = ret; i < SAMPLE_BLOCK_SIZE; i++) {
-                    buffer[i] = 0;
-                }
-            }
-
+            num_bytes_to_read = SAMPLE_BLOCK_SIZE;
         } else {
+            num_bytes_to_read = order.restart_in * sizeof(uint16_t);
+        }
+
+
+        ret = fs_read(&file, buffer, num_bytes_to_read);
+        if(ret < 0) {
+            LOG_ERR("Reader failed to read!");
+            break;
+        }
+        num_byte_samples_played += ret;
+        if (ret != num_bytes_to_read) {
+            LOG_WRN("%d %d %d %li", num_bytes_to_read, ret, order.restart_in, curr_position);
+            // fill the rest with 0s
+            num_byte_samples_played += num_bytes_to_read - ret;
+            for (int i = ret; i < num_bytes_to_read; i++) {
+                buffer[i] = 0;
+                // TODO: For some reason this triggers some times and it makes a pause... why??
+            }
+        }
+
+        if(order.restart_in < SAMPLE_LENGTH) {
+
+            // play beginning of sample now!
+            num_byte_samples_played = 0;
             ret = fs_seek(&file, start_position, FS_SEEK_SET);
             if (ret < 0) {
                 LOG_ERR("fs_seek failed: %d", ret);
                 break;
             }
 
-            uint32_t num_bytes_to_read = order.restart_in * sizeof(uint16_t);
-
-            ret = fs_read(&file, buffer, num_bytes_to_read);
-            if (ret != num_bytes_to_read) {
+            ret = fs_read(&file, buffer+num_bytes_to_read, SAMPLE_BLOCK_SIZE-num_bytes_to_read);
+            num_byte_samples_played += ret;
+            if (ret != SAMPLE_BLOCK_SIZE-num_bytes_to_read) {
                 LOG_ERR("fs_read failed: %d. Sample too short?!", ret);
                 break;
             }
