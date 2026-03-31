@@ -55,6 +55,7 @@ FS_FSTAB_DECLARE_ENTRY(SAMPLE_PARTITION_NODE);
 // TODO: Make "current" beat configuration struct.
 K_MUTEX_DEFINE(beat_config_mutex);
 static volatile float bpm = 120;
+static volatile bool kick_drum_events[4] = {true, true, false, true};
 
 static int cmd_bpm_get(const struct shell *shell, size_t argc, char **argv)
 {
@@ -124,6 +125,89 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_bpm,
 
 SHELL_CMD_REGISTER(bpm, &sub_bpm, "Get or set BPM. Usage: bpm | bpm set <value>", cmd_bpm_get);
 
+static int cmd_kick_get(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    int ret = k_mutex_lock(&beat_config_mutex, K_MSEC(1000));
+    if (ret < 0) {
+        shell_error(shell, "failed to acquire beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    bool event0 = kick_drum_events[0];
+    bool event1 = kick_drum_events[1];
+    bool event2 = kick_drum_events[2];
+    bool event3 = kick_drum_events[3];
+
+    ret = k_mutex_unlock(&beat_config_mutex);
+    if (ret < 0) {
+        shell_error(shell, "failed to release beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    shell_print(shell, "kick pattern=%d,%d,%d,%d", event0, event1, event2, event3);
+    return 0;
+}
+
+static int cmd_kick_set(const struct shell *shell, size_t argc, char **argv)
+{
+    if (argc != 3) {
+        shell_error(shell, "usage: kick set <beat_index> <0|1>");
+        return -EINVAL;
+    }
+
+    errno = 0;
+    char *index_endptr = NULL;
+    unsigned long requested_index = strtoul(argv[1], &index_endptr, 10);
+    if ((errno != 0) || (index_endptr == argv[1]) || (*index_endptr != '\0')) {
+        shell_error(shell, "invalid beat index: %s", argv[1]);
+        return -EINVAL;
+    }
+
+    if (requested_index >= ARRAY_SIZE(kick_drum_events)) {
+        shell_error(shell, "beat index out of range (0..%d): %d",
+            (int)(ARRAY_SIZE(kick_drum_events) - 1), (int)requested_index);
+        return -ERANGE;
+    }
+
+    bool requested_event;
+    if (strcmp(argv[2], "0") == 0) {
+        requested_event = false;
+    } else if (strcmp(argv[2], "1") == 0) {
+        requested_event = true;
+    } else {
+        shell_error(shell, "invalid event value: %s (expected 0 or 1)", argv[2]);
+        return -EINVAL;
+    }
+
+    int ret = k_mutex_lock(&beat_config_mutex, K_MSEC(1000));
+    if (ret < 0) {
+        shell_error(shell, "failed to acquire beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    kick_drum_events[requested_index] = requested_event;
+
+    ret = k_mutex_unlock(&beat_config_mutex);
+    if (ret < 0) {
+        shell_error(shell, "failed to release beat_config_mutex (%d)", ret);
+        return ret;
+    }
+
+    shell_print(shell, "kick[%d]=%d", (int)requested_index, requested_event);
+    return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_kick,
+    SHELL_CMD(set, NULL, "Set kick event. Usage: kick set <beat_index> <0|1>", cmd_kick_set),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(kick, &sub_kick,
+    "Get or set kick pattern. Usage: kick | kick set <beat_index> <0|1>", cmd_kick_get);
+
 static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 {
     (void)arg1;
@@ -132,7 +216,7 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
     int ret;
 
     uint32_t beats_per_measure = 4;
-    uint32_t number_of_measures_in_loop = 1;
+    uint32_t number_of_measures_in_loop = 2;
     uint32_t current_sample = 0;
 
     while(true) {
@@ -145,6 +229,11 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
         // TODO: Check floats vs int types in this expression
         uint32_t number_of_sample_points_per_beat = SAMPLE_RATE/(bpm/60.0f);
 
+        // beats are 0 indexed
+        uint32_t current_beat = (current_sample / number_of_sample_points_per_beat) % beats_per_measure;
+        uint32_t next_beat = (1 + current_beat) % beats_per_measure;
+        bool play_beat = kick_drum_events[next_beat];
+
         ret = k_mutex_unlock(&beat_config_mutex);
         if (ret < 0) {
             LOG_ERR("failed to release beat_config_mutex");
@@ -156,12 +245,13 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
         // Make current_sample % number_of_sample_points_per_beat == 0 mean "we have played the entirety of the last beat"
         uint32_t number_of_sample_points_played_of_beat = (current_sample + number_of_sample_points_per_beat - 1) % number_of_sample_points_per_beat + 1;
 
+
         uint32_t number_of_sample_points_left_from_beat = number_of_sample_points_per_beat - number_of_sample_points_played_of_beat;
         // LOG_INF("x %d %d %d", number_of_sample_points_left_from_beat, number_of_sample_points_played_of_beat, current_sample);
 
         struct read_order_t order = {
             .restart_in = number_of_sample_points_left_from_beat,
-            .play = true
+            .play = play_beat,
         };
 
         ret = k_msgq_put(&order_msgq, &order, K_MSEC(10000));
@@ -253,7 +343,6 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 
     LOG_INF("Starting reader");
 
-    int num_byte_samples_played = 0;
 
     while (1) {
         // k_sleep(K_MSEC(1000));
@@ -278,33 +367,29 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 
         // fill audio block
         uint32_t num_bytes_to_read;
-        if(order.restart_in >= SAMPLE_LENGTH) {
+        bool play_new_note = order.restart_in < SAMPLE_LENGTH && order.play;
+        if(!play_new_note) {
             num_bytes_to_read = SAMPLE_BLOCK_SIZE;
         } else {
             num_bytes_to_read = order.restart_in * sizeof(uint16_t);
         }
-
 
         ret = fs_read(&file, buffer, num_bytes_to_read);
         if(ret < 0) {
             LOG_ERR("Reader failed to read!");
             break;
         }
-        num_byte_samples_played += ret;
         if (ret != num_bytes_to_read) {
-            LOG_WRN("%d %d %d %li", num_bytes_to_read, ret, order.restart_in, curr_position);
+            // LOG_WRN("%d %d %d %li", num_bytes_to_read, ret, order.restart_in, curr_position);
             // fill the rest with 0s
-            num_byte_samples_played += num_bytes_to_read - ret;
             for (int i = ret; i < num_bytes_to_read; i++) {
                 buffer[i] = 0;
                 // TODO: For some reason this triggers some times and it makes a pause... why??
             }
         }
 
-        if(order.restart_in < SAMPLE_LENGTH) {
-
+        if(play_new_note) {
             // play beginning of sample now!
-            num_byte_samples_played = 0;
             ret = fs_seek(&file, start_position, FS_SEEK_SET);
             if (ret < 0) {
                 LOG_ERR("fs_seek failed: %d", ret);
@@ -312,7 +397,6 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
             }
 
             ret = fs_read(&file, buffer+num_bytes_to_read, SAMPLE_BLOCK_SIZE-num_bytes_to_read);
-            num_byte_samples_played += ret;
             if (ret != SAMPLE_BLOCK_SIZE-num_bytes_to_read) {
                 LOG_ERR("fs_read failed: %d. Sample too short?!", ret);
                 break;
