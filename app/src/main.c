@@ -268,15 +268,37 @@ static int cmd_i2s_start(const struct shell *shell, size_t argc, char **argv)
         return ret;
     }
 
+    shell_print(shell, "I2S TX START triggered");
+    return 0;
+}
+
+static int cmd_audio_start(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
     k_sem_give(&audio_start_sem);
 
-    shell_print(shell, "I2S TX START triggered");
+    shell_print(shell, "audio_start_sem given");
+    return 0;
+}
+
+static int cmd_audio_take(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    k_sem_take(&audio_start_sem, K_FOREVER);
+
+    shell_print(shell, "audio_start_sem taken");
     return 0;
 }
 
 SHELL_CMD_REGISTER(i2s_stop, NULL, "Trigger I2S TX STOP", cmd_i2s_stop);
 SHELL_CMD_REGISTER(i2s_drain, NULL, "Trigger I2S TX DRAIN", cmd_i2s_drain);
 SHELL_CMD_REGISTER(i2s_start, NULL, "Trigger I2S TX START", cmd_i2s_start);
+SHELL_CMD_REGISTER(audio_start, NULL, "Give audio_start_sem", cmd_audio_start);
+SHELL_CMD_REGISTER(audio_take, NULL, "Take audio_start_sem (K_FOREVER)", cmd_audio_take);
 
 static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 {
@@ -561,7 +583,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         }
 
         int32_t *buffer;
-        ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_MSEC(5000));
+        ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_FOREVER);
         if (ret < 0) {
             LOG_ERR("k_mem_slab_alloc failed tx_0_mem_slab: %d", ret);
             break;
