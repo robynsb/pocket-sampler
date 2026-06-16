@@ -1,0 +1,81 @@
+#include <dt-bindings/pinctrl/rpi-pico-rp2350a-pinctrl.h>
+#include <zephyr/dt-bindings/dma/rpi-pico-dma-rp2350.h>
+
+/ {
+	aliases {
+		mypio = &pio1;
+
+	};
+	chosen {
+
+    };
+
+	fstab {
+        compatible = "zephyr,fstab";
+        samples: lfs1 {
+            compatible = "zephyr,fstab,littlefs";
+            mount-point = "/samples";
+            partition = <&storage_partition>;
+            automount;
+            read-size = <16>;
+            prog-size = <16>;
+            cache-size = <64>;
+            lookahead-size = <32>;
+            block-cycles = <512>;
+        };
+    };
+};
+
+
+&pinctrl {
+	pio1_i2s: pio1_i2s {
+		tx_pins: tx_pins {
+			//        DATA    CLK BASE  (WS = CLK+1)
+			pinmux = <PIO1_P28 PIO1_P26 PIO1_P27>;
+		};
+	};
+
+};
+
+&pio1 { status = "okay";
+
+	pio1_i2s0: i2s0 {
+		pinctrl-0 = <&pio1_i2s>;
+		pinctrl-names = "default";
+		// TODO: Look over what these mean and that these values make sense
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		compatible = "raspberrypi,pico-i2s-pio";
+		status = "okay";
+
+		// TODO: Check how this works, but for now I believe that:
+		//         channel      SLOT                  channel-config?
+		//         number  (which corresponds to an IRQN)
+		dmas = <&dma 7     RPI_PICO_DMA_SLOT_PIO1_TX0        0>;
+		dma-names = "tx";
+	};
+};
+
+&dma {
+	status = "okay";
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		/*
+		 * Usable flash. Starts at 0x100, after the bootloader. The partition
+		 * size is 1MB minus the 0x100 bytes taken by the bootloader.
+		 */
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x0 0x100 (DT_SIZE_M(1) - 0x100)>;
+			read-only;
+		};
+		storage_partition: partition@100000 {
+			label = "storage-partition";
+			reg = <0x0 DT_SIZE_M(1) DT_SIZE_M(1)>;
+		};
+	};
+};

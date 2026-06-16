@@ -208,6 +208,41 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kick,
 SHELL_CMD_REGISTER(kick, &sub_kick,
     "Get or set kick pattern. Usage: kick | kick set <beat_index> <0|1>", cmd_kick_get);
 
+static int cmd_i2s_restart(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!device_is_ready(i2s0_dev)) {
+        shell_error(shell, "I2S device not ready");
+        return -ENODEV;
+    }
+
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_STOP);
+    if (ret < 0) {
+        shell_error(shell, "I2S trigger STOP failed: %d", ret);
+        return ret;
+    }
+
+    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
+    if (ret < 0) {
+        shell_error(shell, "I2S trigger DRAIN failed: %d", ret);
+        return ret;
+    }
+
+    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
+    if (ret < 0) {
+        shell_error(shell, "I2S trigger START failed: %d", ret);
+        return ret;
+    }
+
+    shell_print(shell, "I2S restarted (STOP, DRAIN, START)");
+    return 0;
+}
+
+SHELL_CMD_REGISTER(i2s_restart, NULL,
+    "Restart I2S TX: i2s_trigger STOP, DRAIN, then START", cmd_i2s_restart);
+
 static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 {
     (void)arg1;
