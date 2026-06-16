@@ -208,7 +208,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_kick,
 SHELL_CMD_REGISTER(kick, &sub_kick,
     "Get or set kick pattern. Usage: kick | kick set <beat_index> <0|1>", cmd_kick_get);
 
-static int cmd_i2s_restart(const struct shell *shell, size_t argc, char **argv)
+static int cmd_i2s_stop(const struct shell *shell, size_t argc, char **argv)
 {
     ARG_UNUSED(argc);
     ARG_UNUSED(argv);
@@ -218,30 +218,65 @@ static int cmd_i2s_restart(const struct shell *shell, size_t argc, char **argv)
         return -ENODEV;
     }
 
+    k_sem_take(&audio_start_sem, K_SECONDS(5));
+
     int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_STOP);
     if (ret < 0) {
         shell_error(shell, "I2S trigger STOP failed: %d", ret);
         return ret;
     }
 
-    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
+    shell_print(shell, "I2S TX STOP triggered");
+    return 0;
+}
+
+static int cmd_i2s_drain(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!device_is_ready(i2s0_dev)) {
+        shell_error(shell, "I2S device not ready");
+        return -ENODEV;
+    }
+
+    k_sem_take(&audio_start_sem, K_SECONDS(5));
+
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
     if (ret < 0) {
         shell_error(shell, "I2S trigger DRAIN failed: %d", ret);
         return ret;
     }
 
-    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
+    shell_print(shell, "I2S TX DRAIN triggered");
+    return 0;
+}
+
+static int cmd_i2s_start(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!device_is_ready(i2s0_dev)) {
+        shell_error(shell, "I2S device not ready");
+        return -ENODEV;
+    }
+
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
     if (ret < 0) {
         shell_error(shell, "I2S trigger START failed: %d", ret);
         return ret;
     }
 
-    shell_print(shell, "I2S restarted (STOP, DRAIN, START)");
+    k_sem_give(&audio_start_sem);
+
+    shell_print(shell, "I2S TX START triggered");
     return 0;
 }
 
-SHELL_CMD_REGISTER(i2s_restart, NULL,
-    "Restart I2S TX: i2s_trigger STOP, DRAIN, then START", cmd_i2s_restart);
+SHELL_CMD_REGISTER(i2s_stop, NULL, "Trigger I2S TX STOP", cmd_i2s_stop);
+SHELL_CMD_REGISTER(i2s_drain, NULL, "Trigger I2S TX DRAIN", cmd_i2s_drain);
+SHELL_CMD_REGISTER(i2s_start, NULL, "Trigger I2S TX START", cmd_i2s_start);
 
 static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
 {
@@ -306,7 +341,7 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
          * Does it do what it's supposed to do?
          */
 
-        ret = k_msgq_put(&order_msgq, &order, K_MSEC(10000));
+        ret = k_msgq_put(&order_msgq, &order, K_FOREVER);
         if (ret < 0) {
             LOG_ERR("failed to enqueue order_msgq");
             break;
@@ -408,7 +443,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
         }
 
         uint8_t *buffer;
-        ret = k_mem_slab_alloc(&sample_data_slab, (void **) &buffer, K_MSEC(5000));
+        ret = k_mem_slab_alloc(&sample_data_slab, (void **) &buffer, K_FOREVER);
         if (ret < 0) {
             LOG_ERR("k_mem_slab_alloc failed sample_data_slab: %d", ret);
             break;
@@ -481,8 +516,8 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
 
 
     // k_sem_take(&reader_start_sem, K_FOREVER);
-    k_sem_take(&audio_start_sem, K_FOREVER);
 
+    k_sem_take(&audio_start_sem, K_FOREVER);
 
     for (int i = 0; i < NUM_BLOCKS; i++) {
 
@@ -507,6 +542,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
             return;
         }
     }
+    k_sem_give(&audio_start_sem);
 
     ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
     if (ret < 0) {
@@ -541,7 +577,9 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         }
         k_mem_slab_free(&sample_data_slab, read_result.data);
 
+        k_sem_take(&audio_start_sem, K_FOREVER);
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
+        k_sem_give(&audio_start_sem);
         if (ret < 0) {
             k_mem_slab_free(&tx_0_mem_slab, buffer);
             LOG_ERR("i2s_write failed: %d", ret);
