@@ -37,7 +37,7 @@ struct read_order_t {
 K_MSGQ_DEFINE(order_msgq, sizeof(struct read_order_t), NUM_BLOCKS, 1);
 
 struct sample_read_result_t {
-    void *data; 
+    void *data;
 };
 
 K_MSGQ_DEFINE(sample_read_result_msgq, sizeof(struct sample_read_result_t), NUM_BLOCKS, 1);
@@ -254,6 +254,23 @@ static void orchestrator_thread(void *arg1, void *arg2, void *arg3)
             .play = play_beat,
         };
 
+        /*
+         * TODO: Maybe make a pure function that takes the "beat state" as input
+         * and outputs a read_order.
+         *
+         * Then you can test this pure function on its own and this orchestrator function just becomes
+         * a wrapper to put stuff into queues.
+         *
+         * Problem:
+         * the API of read_order_t should be stabilised before writing a bunch of tests.
+         *
+         * The tests should use the fact that a host platform has more memory.
+         * Stores some whole thinking and does some checks.
+         *
+         * Does the sequence repeat?
+         * Does it do what it's supposed to do?
+         */
+
         ret = k_msgq_put(&order_msgq, &order, K_MSEC(10000));
         if (ret < 0) {
             LOG_ERR("failed to enqueue order_msgq");
@@ -292,7 +309,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 		   mountpoint->mnt_point,
 		   sbuf.f_bsize, sbuf.f_frsize,
 		   sbuf.f_blocks, sbuf.f_bfree);
-        
+
     char fname[30];
     snprintf(fname, sizeof(fname), "%s/kick0.wav", mountpoint->mnt_point);
 
@@ -321,7 +338,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
     LOG_INF("AudioFormat=%d", audio_format);
 
     uint32_t sample_rate = sys_get_le32(&header_data[0x18]);
-    
+
     uint16_t bit_depth = sys_get_le16(&header_data[0x22]);
 
     char data_string[5];
@@ -447,7 +464,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
             int32_t stereo_sample = (sample_point & 0xFFFF) | (sample_point << 16);
             buffer[j] = stereo_sample;
         }
-        
+
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
         if (ret < 0) {
             k_mem_slab_free(&tx_0_mem_slab, buffer);
@@ -525,13 +542,14 @@ int main(void)
         return -ENODEV;
     }
 
-    struct i2s_config i2s_cfg;
+    struct i2s_config i2s_cfg = {0};
     i2s_cfg.word_size = 16U;
     i2s_cfg.channels = 2U;
     i2s_cfg.format = I2S_FMT_DATA_FORMAT_I2S;
     i2s_cfg.frame_clk_freq = SAMPLE_RATE;
     i2s_cfg.block_size = BLOCK_SIZE;
     i2s_cfg.timeout = 100;
+    i2s_cfg.options = I2S_OPT_BIT_CLK_GATED;
     i2s_cfg.mem_slab = &tx_0_mem_slab;
 
     ret = i2s_configure(i2s0_dev, I2S_DIR_TX, &i2s_cfg);
