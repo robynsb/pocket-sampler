@@ -272,6 +272,26 @@ static int cmd_i2s_start(const struct shell *shell, size_t argc, char **argv)
     return 0;
 }
 
+static int cmd_i2s_prepare(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+    ARG_UNUSED(argv);
+
+    if (!device_is_ready(i2s0_dev)) {
+        shell_error(shell, "I2S device not ready");
+        return -ENODEV;
+    }
+
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_PREPARE);
+    if (ret < 0) {
+        shell_error(shell, "I2S trigger PREPARE failed: %d", ret);
+        return ret;
+    }
+
+    shell_print(shell, "I2S TX PREPARE triggered");
+    return 0;
+}
+
 static int cmd_audio_start(const struct shell *shell, size_t argc, char **argv)
 {
     ARG_UNUSED(argc);
@@ -297,6 +317,7 @@ static int cmd_audio_take(const struct shell *shell, size_t argc, char **argv)
 SHELL_CMD_REGISTER(i2s_stop, NULL, "Trigger I2S TX STOP", cmd_i2s_stop);
 SHELL_CMD_REGISTER(i2s_drain, NULL, "Trigger I2S TX DRAIN", cmd_i2s_drain);
 SHELL_CMD_REGISTER(i2s_start, NULL, "Trigger I2S TX START", cmd_i2s_start);
+SHELL_CMD_REGISTER(i2s_prepare, NULL, "Trigger I2S TX PREPARE", cmd_i2s_prepare);
 SHELL_CMD_REGISTER(audio_start, NULL, "Give audio_start_sem", cmd_audio_start);
 SHELL_CMD_REGISTER(audio_take, NULL, "Take audio_start_sem (K_FOREVER)", cmd_audio_take);
 
