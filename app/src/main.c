@@ -17,8 +17,12 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 // TODO: Consolidate naming between blocks, samples, sample slices, instruments.
 #define SAMPLE_LENGTH 128
 #define NUM_BLOCKS 5
-#define BLOCK_SIZE (SAMPLE_LENGTH * sizeof(int32_t))
-#define SAMPLE_BLOCK_SIZE SAMPLE_LENGTH * sizeof(int16_t)
+/* Each I2S frame is two 32-bit words on the wire: L word then R word. */
+#define WORDS_PER_FRAME 2
+/* Flash samples are 24-bit data left-justified in a 32-bit (s32le) mono word. */
+#define BYTES_PER_FLASH_SAMPLE sizeof(int32_t)
+#define BLOCK_SIZE (SAMPLE_LENGTH * WORDS_PER_FRAME * sizeof(int32_t))
+#define SAMPLE_BLOCK_SIZE (SAMPLE_LENGTH * BYTES_PER_FLASH_SAMPLE)
 #define SAMPLE_RATE 44100
 #define TONE_FREQUENCY_HZ 440.0f
 
@@ -55,7 +59,7 @@ FS_FSTAB_DECLARE_ENTRY(SAMPLE_PARTITION_NODE);
 // TODO: Make "current" beat configuration struct.
 K_MUTEX_DEFINE(beat_config_mutex);
 static volatile float bpm = 120;
-static volatile bool kick_drum_events[4] = {true, true, false, true};
+static volatile bool kick_drum_events[4] = {true, true, true, false};
 
 static int cmd_bpm_get(const struct shell *shell, size_t argc, char **argv)
 {
@@ -434,41 +438,115 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
 		return;
 	}
 
-    uint8_t header_data[0x4E];
-    ret = fs_read(&file, header_data, sizeof(header_data));
-    if (ret < 0) {
-        LOG_ERR("FAIL: read %s: [rd:%d]", fname, ret);
+    /*
+     * Walk the RIFF chunks to locate "fmt " and "data". The encoder (ffmpeg)
+     * inserts a LIST/INFO chunk between them and uses WAVE_FORMAT_EXTENSIBLE,
+     * so fixed header offsets cannot be trusted.
+     * https://en.wikipedia.org/wiki/WAV#WAV_file_header
+     */
+    uint8_t riff[12];
+    ret = fs_read(&file, riff, sizeof(riff));
+    if (ret != sizeof(riff)) {
+        LOG_ERR("FAIL: read RIFF header %s: [rd:%d]", fname, ret);
+        return;
+    }
+    if (memcmp(&riff[0], "RIFF", 4) != 0 || memcmp(&riff[8], "WAVE", 4) != 0) {
+        LOG_ERR("Not a RIFF/WAVE file");
         return;
     }
 
-    // https://en.wikipedia.org/wiki/WAV#WAV_file_header
-    uint32_t header_file_size = sys_get_le32(&header_data[4]) + 8;
-    LOG_INF("Reading wav file, with file size=%d", header_file_size);
+    uint16_t audio_format = 0;
+    uint16_t number_of_channels = 0;
+    uint32_t sample_rate = 0;
+    uint16_t bit_depth = 0;
+    uint32_t sample_data_size = 0;
+    bool found_fmt = false;
+    bool found_data = false;
 
-    uint16_t audio_format = sys_get_le16(&header_data[0x14]);
+    while (!found_data) {
+        uint8_t chunk_header[8];
+        ret = fs_read(&file, chunk_header, sizeof(chunk_header));
+        if (ret != sizeof(chunk_header)) {
+            LOG_ERR("Reached EOF before finding data chunk (rd:%d)", ret);
+            return;
+        }
 
-    uint16_t number_of_channels = sys_get_le16(&header_data[0x16]);
-    LOG_INF("AudioFormat=%d", audio_format);
+        uint32_t chunk_size = sys_get_le32(&chunk_header[4]);
 
-    uint32_t sample_rate = sys_get_le32(&header_data[0x18]);
+        if (memcmp(&chunk_header[0], "fmt ", 4) == 0) {
+            uint8_t fmt[40];
+            uint32_t to_read = MIN(chunk_size, sizeof(fmt));
+            ret = fs_read(&file, fmt, to_read);
+            if (ret != (int)to_read) {
+                LOG_ERR("FAIL: read fmt chunk (rd:%d)", ret);
+                return;
+            }
+            audio_format = sys_get_le16(&fmt[0]);
+            number_of_channels = sys_get_le16(&fmt[2]);
+            sample_rate = sys_get_le32(&fmt[4]);
+            bit_depth = sys_get_le16(&fmt[14]);
+            /* WAVE_FORMAT_EXTENSIBLE: real format is the first 2 bytes of the
+             * SubFormat GUID, which starts at offset 24 within the fmt body. */
+            if (audio_format == 0xFFFE && to_read >= 26) {
+                audio_format = sys_get_le16(&fmt[24]);
+            }
+            found_fmt = true;
+            if (chunk_size > to_read) {
+                ret = fs_seek(&file, chunk_size - to_read, FS_SEEK_CUR);
+                if (ret < 0) {
+                    LOG_ERR("fs_seek failed: %d", ret);
+                    return;
+                }
+            }
+        } else if (memcmp(&chunk_header[0], "data", 4) == 0) {
+            sample_data_size = chunk_size;
+            found_data = true;
+            break; /* file position is now at the start of the audio data */
+        } else {
+            ret = fs_seek(&file, chunk_size, FS_SEEK_CUR);
+            if (ret < 0) {
+                LOG_ERR("fs_seek failed: %d", ret);
+                return;
+            }
+        }
 
-    uint16_t bit_depth = sys_get_le16(&header_data[0x22]);
+        /* RIFF chunks are word-aligned; skip a pad byte after odd sizes. */
+        if (chunk_size & 1u) {
+            ret = fs_seek(&file, 1, FS_SEEK_CUR);
+            if (ret < 0) {
+                LOG_ERR("fs_seek failed: %d", ret);
+                return;
+            }
+        }
+    }
 
-    char data_string[5];
-    memcpy(data_string, &header_data[0x46], 4); // TODO: Don't hard code this beginning?
-    data_string[4] = '\0';
-
-    uint32_t sample_data_size = sys_get_le32(&header_data[0x4A]);
-
-    LOG_INF("WAV: file_size=%" PRIu32, header_file_size);
     LOG_INF("WAV: audio_format=%" PRIu16, audio_format);
     LOG_INF("WAV: channels=%" PRIu16, number_of_channels);
     LOG_INF("WAV: sample_rate=%" PRIu32, sample_rate);
     LOG_INF("WAV: bit_depth=%" PRIu16, bit_depth);
-    LOG_INF("WAV: data_string=%s", data_string);
-    LOG_INF("WAV: sample_data_size=%d", sample_data_size);
+    LOG_INF("WAV: sample_data_size=%" PRIu32, sample_data_size);
 
-    // TODO: Put some errors stating assumptions on audio data.
+    /* Sanity-check the format this player assumes: 32-bit (24-in-32) mono PCM. */
+    if (!found_fmt) {
+        LOG_ERR("WAV missing fmt chunk");
+        return;
+    }
+    if (audio_format != 1) {
+        LOG_ERR("Unsupported audio_format %u (expected PCM)", audio_format);
+        return;
+    }
+    if (number_of_channels != 1) {
+        LOG_ERR("Unsupported channel count %u (expected mono)", number_of_channels);
+        return;
+    }
+    if (bit_depth != 32) {
+        LOG_ERR("Unsupported bit_depth %u (expected 32)", bit_depth);
+        return;
+    }
+    if (sample_rate != SAMPLE_RATE) {
+        LOG_WRN("WAV sample_rate %" PRIu32 " != configured %u", sample_rate, SAMPLE_RATE);
+    }
+
     off_t start_position = fs_tell(&file);
 
     LOG_INF("Starting reader");
@@ -501,7 +579,7 @@ static void sample_flash_reader_thread(void *arg1, void *arg2, void *arg3)
         if(!play_new_note) {
             num_bytes_to_read = SAMPLE_BLOCK_SIZE;
         } else {
-            num_bytes_to_read = order.restart_in * sizeof(uint16_t);
+            num_bytes_to_read = order.restart_in * BYTES_PER_FLASH_SAMPLE;
         }
 
         ret = fs_read(&file, buffer, num_bytes_to_read);
@@ -572,10 +650,8 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         }
 
 
-        for(int j = 0; j < SAMPLE_LENGTH; j++) {
-            int16_t sample_point = 0;
-            int32_t stereo_sample = (sample_point & 0xFFFF) | (sample_point << 16);
-            buffer[j] = stereo_sample;
+        for(int j = 0; j < SAMPLE_LENGTH * WORDS_PER_FRAME; j++) {
+            buffer[j] = 0;
         }
 
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
@@ -614,9 +690,11 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         uint8_t *sample_data = read_result.data;
 
         for(int j = 0; j < SAMPLE_LENGTH; j++) {
-            int16_t sample_point = sys_get_le16(&sample_data[2*j]);
-            int32_t stereo_sample = (sample_point & 0xFFFF) | (sample_point << 16);
-            buffer[j] = stereo_sample;
+            /* One 24-in-32 mono sample fanned out to L and R words. The flash
+             * word is already left-justified for the PIO's MSB-first shift. */
+            int32_t sample_point = sys_get_le32(&sample_data[BYTES_PER_FLASH_SAMPLE * j]);
+            buffer[WORDS_PER_FRAME * j]     = sample_point; /* L */
+            buffer[WORDS_PER_FRAME * j + 1] = sample_point; /* R */
         }
         k_mem_slab_free(&sample_data_slab, read_result.data);
 
@@ -659,7 +737,7 @@ int main(void)
     }
 
     struct i2s_config i2s_cfg = {0};
-    i2s_cfg.word_size = 16U;
+    i2s_cfg.word_size = 24U;
     i2s_cfg.channels = 2U;
     i2s_cfg.format = I2S_FMT_DATA_FORMAT_I2S;
     i2s_cfg.frame_clk_freq = SAMPLE_RATE;
