@@ -16,7 +16,7 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
 // TODO: Consolidate naming between blocks, samples, sample slices, instruments.
 #define SAMPLE_LENGTH 128
-#define NUM_BLOCKS 5
+#define NUM_BLOCKS 6
 /* Each I2S frame is two 32-bit words on the wire: L word then R word. */
 #define WORDS_PER_FRAME 2
 /* Flash samples are 24-bit data left-justified in a 32-bit (s32le) mono word. */
@@ -224,7 +224,7 @@ static int cmd_i2s_stop(const struct shell *shell, size_t argc, char **argv)
 
     k_sem_take(&audio_start_sem, K_SECONDS(5));
 
-    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_STOP);
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_BOTH, I2S_TRIGGER_STOP);
     if (ret < 0) {
         shell_error(shell, "I2S trigger STOP failed: %d", ret);
         return ret;
@@ -246,7 +246,7 @@ static int cmd_i2s_drain(const struct shell *shell, size_t argc, char **argv)
 
     k_sem_take(&audio_start_sem, K_SECONDS(5));
 
-    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_DRAIN);
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_BOTH, I2S_TRIGGER_DRAIN);
     if (ret < 0) {
         shell_error(shell, "I2S trigger DRAIN failed: %d", ret);
         return ret;
@@ -266,7 +266,7 @@ static int cmd_i2s_start(const struct shell *shell, size_t argc, char **argv)
         return -ENODEV;
     }
 
-    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_BOTH, I2S_TRIGGER_START);
     if (ret < 0) {
         shell_error(shell, "I2S trigger START failed: %d", ret);
         return ret;
@@ -286,7 +286,7 @@ static int cmd_i2s_prepare(const struct shell *shell, size_t argc, char **argv)
         return -ENODEV;
     }
 
-    int ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_PREPARE);
+    int ret = i2s_trigger(i2s0_dev, I2S_DIR_BOTH, I2S_TRIGGER_PREPARE);
     if (ret < 0) {
         shell_error(shell, "I2S trigger PREPARE failed: %d", ret);
         return ret;
@@ -640,7 +640,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
 
     k_sem_take(&audio_start_sem, K_FOREVER);
 
-    for (int i = 0; i < NUM_BLOCKS; i++) {
+    for (int i = 0; i < NUM_BLOCKS/2; i++) {
 
         int32_t *buffer;
         ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_MSEC(5000));
@@ -663,7 +663,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
     }
     k_sem_give(&audio_start_sem);
 
-    ret = i2s_trigger(i2s0_dev, I2S_DIR_TX, I2S_TRIGGER_START);
+    ret = i2s_trigger(i2s0_dev, I2S_DIR_BOTH, I2S_TRIGGER_START);
     if (ret < 0) {
         LOG_ERR("I2S trigger start failed: %d", ret);
         return;
@@ -746,7 +746,7 @@ int main(void)
     i2s_cfg.options = I2S_OPT_BIT_CLK_GATED;
     i2s_cfg.mem_slab = &tx_0_mem_slab;
 
-    ret = i2s_configure(i2s0_dev, I2S_DIR_TX, &i2s_cfg);
+    ret = i2s_configure(i2s0_dev, I2S_DIR_BOTH, &i2s_cfg);
     if (ret < 0) {
         LOG_ERR("I2S config failed: %d", ret);
         return ret;

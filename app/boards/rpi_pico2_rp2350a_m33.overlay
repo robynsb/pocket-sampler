@@ -29,9 +29,15 @@
 
 &pinctrl {
 	pio1_i2s: pio1_i2s {
-		tx_pins: tx_pins {
-			//        DATA    CLK BASE  (WS = CLK+1)
-			pinmux = <PIO1_P28 PIO1_P26 PIO1_P27>;
+		tx_data: tx_data {
+			pinmux = <PIO1_P28>;
+		};
+		rx_data: rx_data {
+			pinmux = <PIO1_P25>;
+		};
+		clks: clks {
+			//        CLK BASE  (WS = CLK+1)
+			pinmux = <PIO1_P26 PIO1_P27>;
 		};
 	};
 
@@ -52,8 +58,9 @@
 		// TODO: Check how this works, but for now I believe that:
 		//         channel      SLOT                  channel-config?
 		//         number  (which corresponds to an IRQN)
-		dmas = <&dma 7     RPI_PICO_DMA_SLOT_PIO1_TX0        0>;
-		dma-names = "tx";
+		dmas = <&dma 7     RPI_PICO_DMA_SLOT_PIO1_TX0        0>,
+    		   <&dma 8     RPI_PICO_DMA_SLOT_PIO1_RX0        0>;
+		dma-names = "tx", "rx";
 	};
 };
 
