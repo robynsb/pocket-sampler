@@ -33,7 +33,10 @@
 			pinmux = <PIO1_P28>;
 		};
 		rx_data: rx_data {
-			pinmux = <PIO1_P25>;
+			pinmux = <PIO1_P22>;
+			/* Enable the pad input buffer so the PIO `in pins` can sample
+			 * the external RX data line (off by default). */
+			input-enable;
 		};
 		clks: clks {
 			//        CLK BASE  (WS = CLK+1)

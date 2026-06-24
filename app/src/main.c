@@ -28,6 +28,17 @@ LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
 
 K_SEM_DEFINE(audio_start_sem, 0, 1);
 
+/*
+ * tx_0_mem_slab is shared between the TX path (i2s_write) and the dummy RX
+ * reader (i2s_read). The driver frees a transmitted TX block and then allocates
+ * a fresh block to fill on RX, on average 1:1. This shared counting semaphore
+ * caps how far TX may run ahead of RX: sound_thread *takes* a credit before
+ * handing a block to i2s_write, and i2s_read_thread *gives* one back after it
+ * frees a received block. Seeding it with NUM_BLOCKS/2 keeps the TX path from
+ * claiming more than half the slab and starving RX of blocks to receive into.
+ */
+K_SEM_DEFINE(i2s_block_credits, NUM_BLOCKS / 2, NUM_BLOCKS / 2);
+
 // TODO: Think about these alignments
 K_MEM_SLAB_DEFINE_STATIC(tx_0_mem_slab, BLOCK_SIZE, NUM_BLOCKS, 32);
 
@@ -642,9 +653,13 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
 
     for (int i = 0; i < NUM_BLOCKS/2; i++) {
 
+        /* Claim a shared slab credit before staging a block for TX. */
+        k_sem_take(&i2s_block_credits, K_FOREVER);
+
         int32_t *buffer;
         ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_MSEC(5000));
         if (ret < 0) {
+            k_sem_give(&i2s_block_credits);
             LOG_ERR("k_mem_slab_alloc timeout failed: %d", ret);
             return;
         }
@@ -657,6 +672,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         ret = i2s_write(i2s0_dev, buffer, BLOCK_SIZE);
         if (ret < 0) {
             k_mem_slab_free(&tx_0_mem_slab, buffer);
+            k_sem_give(&i2s_block_credits);
             LOG_ERR("Initial i2s_write failed: %d", ret);
             return;
         }
@@ -679,9 +695,17 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
             break;
         }
 
+        /*
+         * Claim a shared slab credit before staging a block for TX. This blocks
+         * once TX is NUM_BLOCKS/2 blocks ahead of RX, until i2s_read_thread
+         * frees a received block and returns a credit.
+         */
+        k_sem_take(&i2s_block_credits, K_FOREVER);
+
         int32_t *buffer;
         ret = k_mem_slab_alloc(&tx_0_mem_slab, (void **) &buffer, K_FOREVER);
         if (ret < 0) {
+            k_sem_give(&i2s_block_credits);
             LOG_ERR("k_mem_slab_alloc failed tx_0_mem_slab: %d", ret);
             break;
         }
@@ -703,6 +727,7 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
         k_sem_give(&audio_start_sem);
         if (ret < 0) {
             k_mem_slab_free(&tx_0_mem_slab, buffer);
+            k_sem_give(&i2s_block_credits);
             LOG_ERR("i2s_write failed: %d", ret);
             k_sleep(K_MSEC(1000));
             break;
@@ -714,8 +739,61 @@ static void sound_thread(void *arg1, void *arg2, void *arg3)
     }
 }
 
+static void i2s_read_thread(void *arg1, void *arg2, void *arg3)
+{
+    (void)arg1;
+    (void)arg2;
+    (void)arg3;
+    int ret;
+
+    /* Wait until I2S is up and running before pulling RX blocks. */
+    k_sem_take(&audio_start_sem, K_FOREVER);
+    k_sem_give(&audio_start_sem);
+
+    /* Accumulate across LOG_EVERY_N_BLOCKS blocks, then log one running mean. */
+    const uint32_t LOG_EVERY_N_BLOCKS = 1000;
+    int64_t running_sum = 0;
+    uint64_t running_words = 0;
+    uint32_t blocks_accumulated = 0;
+
+    while (1) {
+        void *mem_block;
+        size_t block_size;
+
+        ret = i2s_read(i2s0_dev, &mem_block, &block_size);
+        if (ret < 0) {
+            LOG_ERR("i2s_read failed: %d", ret);
+            k_sleep(K_MSEC(5));
+            continue;
+        }
+
+        /* Fold this block's 32-bit (24-in-32) words into the running totals. */
+        const int32_t *samples = mem_block;
+        size_t num_words = block_size / sizeof(int32_t);
+        for (size_t i = 0; i < num_words; i++) {
+            running_sum += samples[i];
+        }
+        running_words += num_words;
+
+        /* Free as blocks arrive; the driver freed a TX block to hand us this
+         * one, so returning a credit lets the TX path stage one more. */
+        k_mem_slab_free(&tx_0_mem_slab, mem_block);
+        k_sem_give(&i2s_block_credits);
+
+        if (++blocks_accumulated >= LOG_EVERY_N_BLOCKS) {
+            int32_t mean = running_words ? (int32_t)(running_sum / (int64_t)running_words) : 0;
+            LOG_INF("i2s_read: %u blocks, %llu words, mean=%" PRId32,
+                    blocks_accumulated, running_words, mean);
+            running_sum = 0;
+            running_words = 0;
+            blocks_accumulated = 0;
+        }
+    }
+}
+
 #define AUDIO_THREAD_STACK_SIZE 1024
 K_THREAD_DEFINE(reader_tid, AUDIO_THREAD_STACK_SIZE, sample_flash_reader_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(i2s_reader_tid, AUDIO_THREAD_STACK_SIZE, i2s_read_thread, NULL, NULL, NULL, 5, 0, 0);
 K_THREAD_DEFINE(sounder_tid, AUDIO_THREAD_STACK_SIZE, sound_thread, NULL, NULL, NULL, 5, 0, 0);
 K_THREAD_DEFINE(orchestrator_tid, AUDIO_THREAD_STACK_SIZE, orchestrator_thread, NULL, NULL, NULL, 5, 0, 0);
 
@@ -742,7 +820,7 @@ int main(void)
     i2s_cfg.format = I2S_FMT_DATA_FORMAT_I2S;
     i2s_cfg.frame_clk_freq = SAMPLE_RATE;
     i2s_cfg.block_size = BLOCK_SIZE;
-    i2s_cfg.timeout = 100;
+    i2s_cfg.timeout = 10000;
     i2s_cfg.options = I2S_OPT_BIT_CLK_GATED;
     i2s_cfg.mem_slab = &tx_0_mem_slab;
 
